@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "motion": "node scripts/download-motion-photos.mjs",
+    "motion:extract": "bash scripts/extract-motion-photo-videos.sh",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

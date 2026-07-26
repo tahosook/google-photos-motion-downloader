@@ -53,6 +53,23 @@ downloads/
 npm run motion -- --from 2026-03-07 --to 2026-03-08 --output /path/to/output
 ```
 
+## Extract MP4 from JPG
+
+Googleフォトから取得した Motion Photo の JPG/JPEG に埋め込まれた動画を、
+`exiftool` で MP4 として抽出できます。MP4 は元の画像と同じフォルダに保存され、
+処理済みの元 JPG/JPEG は対象フォルダ直下の `jpg/` に移動されます。
+同名の MP4 や移動先の JPG/JPEG が既にある場合はスキップされます。
+
+```bash
+npm run motion:extract -- /path/to/photos
+```
+
+対象フォルダを省略した場合は、現在のフォルダを検索します。
+
+```bash
+npm run motion:extract
+```
+
 同じ写真は `.motion-manifest.json` に記録され、再実行時にスキップされます。強制的に再取得する場合は `--force` を指定します。
 
 ```bash
