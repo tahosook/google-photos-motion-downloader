@@ -7,12 +7,14 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const DEFAULT_OUTPUT_DIR = 'downloads';
-const DEFAULT_AUTH_DIR = '.auth/google-photos';
-const AUTH_MARKER = '.authenticated';
+const DEFAULT_AUTH_DIR = process.env.GOOGLE_PHOTOS_AUTH_DIR || '.auth/google-photos';
+const DEFAULT_AUTH_MARKER = '.auth/google-photos/.authenticated';
 const PHOTO_HOME = 'https://photos.google.com/';
-const MAX_SCROLLS = 500;
+const MAX_SCROLLS = 180;
+const DISCOVERY_TIMEOUT_MS = 3 * 60 * 1000;
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 const DOWNLOAD_TIMEOUT_MS = 60 * 1000;
+const CHROME_EXECUTABLE = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 function usage() {
   return `Usage:
@@ -22,6 +24,8 @@ Options:
   --from YYYY-MM-DD  Inclusive start date (required)
   --to YYYY-MM-DD    Inclusive end date (required)
   --output PATH      Output directory (default: ./downloads)
+  --auth-dir PATH    Dedicated browser profile directory (default: .auth/google-photos)
+  --cdp-url URL      Connect to an already running Chrome (for example http://127.0.0.1:9222)
   --headed            Show the browser window
   --force             Re-download photos recorded in the manifest
   --help              Show this help
@@ -57,6 +61,8 @@ export function parseCliArgs(argv) {
       from: { type: 'string' },
       to: { type: 'string' },
       output: { type: 'string', default: DEFAULT_OUTPUT_DIR },
+      'auth-dir': { type: 'string', default: DEFAULT_AUTH_DIR },
+      'cdp-url': { type: 'string' },
       headed: { type: 'boolean', default: false },
       force: { type: 'boolean', default: false },
       help: { type: 'boolean', default: false },
@@ -75,6 +81,8 @@ export function parseCliArgs(argv) {
     from,
     to,
     output: path.resolve(values.output),
+    authDir: path.resolve(values['auth-dir']),
+    cdpUrl: values['cdp-url']?.trim() || null,
     headed: values.headed,
     force: values.force,
   };
@@ -114,12 +122,13 @@ async function waitForSignedIn(page, headed) {
   throw new Error('ログインを確認できませんでした。');
 }
 
-async function collectPhotoLinks(page, from, to) {
+async function collectPhotoLinks(page, from, to, options = {}) {
   const links = new Map();
   let stagnant = 0;
   let lastCount = 0;
   let oldestVisible = null;
 
+  const deadline = Date.now() + (options.discoveryTimeoutMs || DISCOVERY_TIMEOUT_MS);
   for (let scroll = 0; scroll < MAX_SCROLLS; scroll += 1) {
     const visible = await page.locator('a[href*="/photo/"]').evaluateAll((anchors) => anchors.map((anchor) => ({
       href: anchor.href,
@@ -145,13 +154,17 @@ async function collectPhotoLinks(page, from, to) {
     const atBottom = await page.evaluate(() => window.innerHeight + window.scrollY >= document.body.scrollHeight - 300);
     const afterHeight = await page.evaluate(() => document.body.scrollHeight);
     if (atBottom && afterHeight === beforeHeight && stagnant >= 4) break;
+    if ((scroll + 1) % 20 === 0) console.log(`写真一覧を確認中: ${scroll + 1}/${MAX_SCROLLS}スクロール、対象${links.size}件`);
+    if (Date.now() >= deadline) throw new Error(`写真一覧の取得がタイムアウトしました（${Math.round((options.discoveryTimeoutMs || DISCOVERY_TIMEOUT_MS) / 1000)}秒）。`);
   }
 
   return [...links.values()].sort((a, b) => a.date.localeCompare(b.date) || a.href.localeCompare(b.href));
 }
 
 async function getPhotoAlt(page) {
-  return page.locator('img[alt^="写真 - "], img[alt^="Photo - "]').first().getAttribute('alt').catch(() => null);
+  const locator = page.locator('img[alt^="写真 - "], img[alt^="Photo - "]');
+  if (!(await locator.count())) return null;
+  return locator.first().getAttribute('alt').catch(() => null);
 }
 
 async function downloadMotionPhoto(page, photo, options, manifest) {
@@ -194,20 +207,39 @@ export async function run(options) {
   const { chromium } = await import('playwright');
   await fs.mkdir(options.output, { recursive: true });
   const manifest = await readJson(options.manifestFile, {});
-  const authDir = path.resolve(options.authDir);
-  const authMarker = path.join(authDir, AUTH_MARKER);
+  const authMarker = path.resolve(options.authMarkerFile || (options.cdpUrl
+    ? DEFAULT_AUTH_MARKER
+    : path.join(options.authDir, '.authenticated')));
   const headed = options.headed || !fsSync.existsSync(authMarker);
-  const context = await chromium.launchPersistentContext(authDir, {
-    headless: !headed,
-    acceptDownloads: true,
-  });
+  let browser;
+  let context;
+  let ownsBrowser = false;
+
+  if (options.cdpUrl) {
+    browser = await chromium.connectOverCDP(options.cdpUrl);
+    context = browser.contexts()[0];
+    if (!context) throw new Error(`CDP接続先にブラウザコンテキストがありません: ${options.cdpUrl}`);
+  } else {
+    browser = await chromium.launchPersistentContext(options.authDir, {
+      headless: !headed,
+      acceptDownloads: true,
+      ...(fsSync.existsSync(CHROME_EXECUTABLE) ? { executablePath: CHROME_EXECUTABLE } : {}),
+    });
+    context = browser;
+    ownsBrowser = true;
+  }
 
   try {
-    const page = context.pages()[0] || await context.newPage();
-    await page.goto(PHOTO_HOME, { waitUntil: 'domcontentloaded' });
+    const page = context.pages().find((candidate) => candidate.url().startsWith('https://photos.google.com'))
+      || context.pages()[0]
+      || await context.newPage();
+    if (!page.url().startsWith('https://photos.google.com')) {
+      await page.goto(PHOTO_HOME, { waitUntil: 'domcontentloaded' });
+    }
     await waitForSignedIn(page, headed);
+    await fs.mkdir(path.dirname(authMarker), { recursive: true });
     await fs.writeFile(authMarker, `${new Date().toISOString()}\n`, 'utf8');
-    const photos = await collectPhotoLinks(page, options.from, options.to);
+    const photos = await collectPhotoLinks(page, options.from, options.to, options);
     if (!photos.length) throw new Error(`対象期間の写真が見つかりませんでした: ${options.from} - ${options.to}`);
 
     console.log(`対象写真: ${photos.length}件`);
@@ -226,7 +258,7 @@ export async function run(options) {
     console.log(`完了: ${JSON.stringify(counts)}`);
     if (counts.failed > 0) process.exitCode = 1;
   } finally {
-    await context.close();
+    if (ownsBrowser) await context.close();
   }
 }
 
@@ -237,7 +269,6 @@ async function main() {
       console.log(usage());
       return;
     }
-    options.authDir = path.resolve(DEFAULT_AUTH_DIR);
     options.manifestFile = path.join(options.output, '.motion-manifest.json');
     await run(options);
   } catch (error) {
