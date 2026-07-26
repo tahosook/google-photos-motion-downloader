@@ -27,7 +27,6 @@ TIMESTAMP_RE = re.compile(r'^\d{12}\.\d{2}$')
 JPG_TAGS = [
     'Composite:DateTimeOriginal',
     'EXIF:DateTimeOriginal',
-    'Composite:CreateDate',
     'EXIF:CreateDate',
     'EXIF:ModifyDate',
 ]
@@ -65,6 +64,8 @@ def get_exif_metadata(filepath: str, tags: List[str], *, quicktime_utc: bool = F
 
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            return {}
         raw = result.stdout.strip()
         if not raw:
             return {}
