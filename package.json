@@ -1,0 +1,13 @@
+{
+  "name": "google-photos-motion-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "motion": "node scripts/download-motion-photos.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}
