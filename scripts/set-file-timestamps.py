@@ -1,142 +1,202 @@
 #!/usr/bin/env python3
 """
-ファイルのタイムスタンプを EXIF 情報に基づいて設定する。
-JPEG: EXIF:DateTimeOriginal / EXIF:CreateDate / EXIF:ModifyDate
-MP4:  QuickTime:CreateDate / QuickTime:ModifyDate
-EXIF が取得できない場合はファイル名 (PXL_YYYYMMDD_HHMMSS...) から日時を抽出する。
+Set file timestamps from EXIF/QuickTime metadata.
 
-Usage:
-    python3 scripts/set-file-timestamps.py [target_directory]
+JPEG: Composite:DateTimeOriginal > EXIF:DateTimeOriginal > Composite:CreateDate > EXIF:CreateDate > EXIF:ModifyDate
+MP4:  QuickTime:CreateDate > QuickTime:ModifyDate (UTC → JST via QuickTimeUTC=1)
+Fallback: PXL_YYYYMMDD_HHMMSS filename pattern
+
+Usage: python3 scripts/set-file-timestamps.py [target_directory]
 """
 
 import argparse
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, List
+from typing import Dict, List, Optional, Tuple
 
 JST = timezone(timedelta(hours=9))
+TIMESTAMP_FMT = '%Y%m%d%H%M.%S'
+TIMESTAMP_RE = re.compile(r'^\d{12}\.\d{2}$')
+
+JPG_TAGS = [
+    'Composite:DateTimeOriginal',
+    'EXIF:DateTimeOriginal',
+    'Composite:CreateDate',
+    'EXIF:CreateDate',
+    'EXIF:ModifyDate',
+]
+
+MP4_TAGS = [
+    'QuickTime:CreateDate',
+    'QuickTime:ModifyDate',
+]
+
+TARGET_EXTENSIONS = ('.jpg', '.jpeg', '.mp4')
 
 
-def get_exif_timestamp(filepath: str, tags: List[str], quicktime_utc: bool = False) -> Optional[str]:
-    """exiftool で指定タグからタイムスタンプを取得する（ローカル時刻として返す）。"""
-    base_args = ['exiftool', '-q', '-q', '-s3', '-d', '%Y%m%d%H%M.%S']
+def require_command(cmd: str) -> None:
+    """Check a command is available; exit with error if not found."""
+    if shutil.which(cmd) is None:
+        print(f'{cmd} が見つかりません。', file=sys.stderr)
+        sys.exit(1)
+
+
+def get_exif_metadata(filepath: str, tags: List[str], *, quicktime_utc: bool = False) -> Dict[str, str]:
+    """
+    Run exiftool once per file and return a dict of tag → value.
+
+    With ``-G`` the JSON keys include the group prefix, e.g.
+    ``EXIF:DateTimeOriginal`` or ``QuickTime:CreateDate``.
+
+    Only tags whose value matches the expected timestamp format are kept.
+    """
+    args = ['exiftool', '-q', '-q', '-json', '-G', '-d', TIMESTAMP_FMT]
     if quicktime_utc:
-        base_args.insert(1, '-api')
-        base_args.insert(2, 'QuickTimeUTC=1')
+        args.extend(['-api', 'QuickTimeUTC=1'])
     for tag in tags:
-        try:
-            result = subprocess.run(
-                base_args + [f'-{tag}', filepath],
-                capture_output=True, text=True, timeout=10,
-            )
-            ts = result.stdout.strip()
-            if re.match(r'^\d{12}\.\d{2}$', ts):
-                return ts
-        except (subprocess.TimeoutExpired, OSError):
-            continue
+        args.append(f'-{tag}')
+    args.append(filepath)
+
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        raw = result.stdout.strip()
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        if not data:
+            return {}
+        entry: dict = data[0]
+        # Keep only values matching the expected format
+        validated: Dict[str, str] = {}
+        for key, value in entry.items():
+            # -json -G と -d を同時に使うと値が float/int で返ることがある
+            if isinstance(value, str):
+                s = value
+            elif isinstance(value, (int, float)):
+                s = f'{value:.2f}'
+            else:
+                continue
+            if TIMESTAMP_RE.match(s):
+                validated[key] = s
+        return validated
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, IndexError):
+        return {}
+
+
+def pick_best_timestamp(metadata: Dict[str, str], priority_tags: List[str]) -> Optional[str]:
+    """Return the first tag from *priority_tags* that exists in *metadata*."""
+    for tag in priority_tags:
+        if tag in metadata:
+            return metadata[tag]
     return None
 
 
-def get_filename_timestamp(filename: str) -> Optional[str]:
-    """ファイル名 PXL_YYYYMMDD_HHMMSS... からタイムスタンプを抽出する。"""
+def parse_timestamp_jst(ts: str) -> datetime:
+    """Parse ``YYYYMMDDHHMM.SS`` as JST and return an aware datetime."""
+    return datetime.strptime(ts, TIMESTAMP_FMT).replace(tzinfo=JST)
+
+
+def extract_filename_timestamp(filename: str) -> Optional[str]:
+    """Extract ``YYYYMMDDHHMM.SS`` from ``PXL_YYYYMMDD_HHMMSS...``."""
     m = re.match(r'^PXL_(\d{8})_(\d{6})', filename)
     if m:
-        ymd = m.group(1)
-        hms = m.group(2)
-        return f'{ymd}{hms[:4]}.{hms[4:6]}'
-    # → YYYYMMDDHHMM.SS (12桁.2桁)
+        return f'{m.group(1)}{m.group(2)[:4]}.{m.group(2)[4:6]}'
     return None
 
 
-def set_file_timestamps(filepath: str, timestamp_str: str) -> bool:
+def set_file_timestamps(filepath: str, dt: datetime) -> bool:
     """
-    ファイルのタイムスタンプを設定する。
-    - touch (os.utime): 更新日時・アクセス日時
-    - SetFile: macOS の作成日時
+    Set modification/access time via ``os.utime`` and
+    macOS creation date via ``SetFile``.
     """
     try:
-        dt = datetime.strptime(timestamp_str, '%Y%m%d%H%M.%S')
         ts = dt.timestamp()
-
-        # 更新日時・アクセス日時
         os.utime(filepath, (ts, ts))
 
-        # macOS の作成日時 (SetFile)
-        date_part = timestamp_str.split('.')[0]
-        time_part = timestamp_str.split('.')[1]
-        setfile_date = f'{date_part[4:6]}/{date_part[6:8]}/{date_part[0:4]} {date_part[8:10]}:{date_part[10:12]}:{time_part}'
+        setfile_val = dt.strftime('%m/%d/%Y %H:%M:%S')
         subprocess.run(
-            ['SetFile', '-d', setfile_date, filepath],
+            ['SetFile', '-d', setfile_val, filepath],
             capture_output=True, text=True, timeout=10, check=True,
         )
         return True
-    except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
-def main():
-    parser = argparse.ArgumentParser(description='EXIF/ファイル名からタイムスタンプを設定')
+def process_one(path: Path) -> Tuple[str, Optional[datetime]]:
+    """
+    Determine the best timestamp for *path*.
+
+    Returns ``(source_label, aware_datetime_or_None)``.
+    *source_label* is ``'exiftool'``, ``'filename'``, or ``''``.
+    """
+    suffix = path.suffix.lower()
+    filename = path.name
+    ts_str: Optional[str] = None
+
+    if suffix in ('.jpg', '.jpeg'):
+        meta = get_exif_metadata(str(path), JPG_TAGS)
+        ts_str = pick_best_timestamp(meta, JPG_TAGS)
+    elif suffix == '.mp4':
+        meta = get_exif_metadata(str(path), MP4_TAGS, quicktime_utc=True)
+        ts_str = pick_best_timestamp(meta, MP4_TAGS)
+
+    if ts_str is not None:
+        return ('exiftool', parse_timestamp_jst(ts_str))
+
+    ts_str = extract_filename_timestamp(filename)
+    if ts_str is not None:
+        return ('filename', parse_timestamp_jst(ts_str))
+
+    return ('', None)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description='EXIF/ファイル名からタイムスタンプを設定',
+    )
     parser.add_argument('target_dir', nargs='?', default='.',
                         help='対象ディレクトリ（デフォルト: カレントディレクトリ）')
     args = parser.parse_args()
 
-    target_dir = Path(args.target_dir)
-    if not target_dir.is_dir():
-        print(f'対象フォルダが見つかりません: {target_dir}', file=sys.stderr)
+    target = Path(args.target_dir)
+    if not target.is_dir():
+        print(f'対象フォルダが見つかりません: {target}', file=sys.stderr)
         sys.exit(1)
 
-    # 必要なコマンドの確認
-    for cmd in ['exiftool', 'SetFile']:
-        if not subprocess.run(['which', cmd], capture_output=True).returncode == 0:
-            print(f'{cmd} が見つかりません。', file=sys.stderr)
-            sys.exit(1)
+    require_command('exiftool')
+    require_command('SetFile')
 
     processed = 0
     skipped = 0
     exif_used = 0
     filename_fallback = 0
 
-    # 対象拡張子
-    extensions = ('.jpg', '.jpeg', '.mp4')
-
-    for filepath in sorted(target_dir.rglob('*')):
-        if not filepath.is_file():
+    for fp in sorted(target.rglob('*')):
+        if not fp.is_file():
             continue
-        if filepath.suffix.lower() not in extensions:
+        if fp.suffix.lower() not in TARGET_EXTENSIONS:
             continue
 
-        filename = filepath.name
-        timestamp = None
+        source, dt = process_one(fp)
 
-        if filepath.suffix.lower() in ('.jpg', '.jpeg'):
-            timestamp = get_exif_timestamp(
-                str(filepath),
-                ['EXIF:DateTimeOriginal', 'EXIF:CreateDate', 'EXIF:ModifyDate'],
-            )
-        elif filepath.suffix.lower() == '.mp4':
-            # QuickTime タグは UTC で保存されているので -api QuickTimeUTC=1 で JST に変換
-            timestamp = get_exif_timestamp(
-                str(filepath),
-                ['QuickTime:CreateDate', 'QuickTime:ModifyDate'],
-                quicktime_utc=True,
-            )
+        if dt is None:
+            skipped += 1
+            continue
 
-        if timestamp:
+        if source == 'exiftool':
             exif_used += 1
         else:
-            timestamp = get_filename_timestamp(filename)
-            if timestamp:
-                filename_fallback += 1
+            filename_fallback += 1
 
-        if timestamp:
-            if set_file_timestamps(str(filepath), timestamp):
-                processed += 1
-            else:
-                skipped += 1
+        if set_file_timestamps(str(fp), dt):
+            processed += 1
         else:
             skipped += 1
 
