@@ -76,6 +76,14 @@ npm run motion:extract
 npm run motion -- --from 2026-03-07 --to 2026-03-08 --force
 ```
 
+## Tampermonkey (User Script)
+
+普段使いの Chrome で Google フォトを開いて直接ダウンロードする場合は、Tampermonkey ユーザースクリプトも利用できます。
+
+1. Tampermonkey に `scripts/tampermonkey-motion-downloader.user.js` を登録します。
+2. 通常の Chrome で Google フォト（https://photos.google.com/）を開くと、画面右上に操作パネルが表示されます。
+3. 日付範囲を指定して「開始」をクリックすると、順次ダウンロードされます。
+
 ## Options
 
 ```text

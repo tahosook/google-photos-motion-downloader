@@ -105,7 +105,7 @@ async function writeJson(file, value) {
 async function waitForSignedIn(page, headed) {
   const isSignedIn = async () => {
     if (page.url().includes('accounts.google.com')) return false;
-    return (await page.locator('button[aria-label*="Google アカウント"], button[aria-label*="Google Account"]').count()) > 0;
+    return (await page.locator('[aria-label*="Google アカウント"], [aria-label*="Google Account"]').count()) > 0;
   };
 
   if (await isSignedIn()) return;
@@ -174,13 +174,14 @@ async function downloadMotionPhoto(page, photo, options, manifest) {
   }
 
   await page.goto(photo.href, { waitUntil: 'domcontentloaded' });
-  await page.locator('button[aria-label*="その他のオプション"], button[aria-label*="More options"]').first().waitFor({ timeout: 15000 });
+  const moreBtn = page.locator('button[aria-label*="その他のオプション"]:visible, button[aria-label*="More options"]:visible').first();
+  await moreBtn.waitFor({ timeout: 15000 });
 
-  const motionButton = page.locator('button[aria-label*="モーション フォト"], button[aria-label*="Motion photo"]');
+  const motionButton = page.locator('button[aria-label*="モーション フォト"]:visible, button[aria-label*="Motion photo"]:visible');
   if (!(await motionButton.count())) return { status: 'skipped_not_motion' };
 
-  await page.getByRole('button', { name: /その他のオプション|More options/ }).click();
-  const videoItem = page.getByRole('menuitem', { name: /動画をダウンロード|Download video/ });
+  await moreBtn.click();
+  const videoItem = page.locator('[role="menuitem"]:visible').filter({ hasText: /動画をダウンロード|Download video/ });
   if (!(await videoItem.count())) {
     await page.keyboard.press('Escape').catch(() => {});
     return { status: 'skipped_no_video_menu' };
@@ -233,7 +234,7 @@ export async function run(options) {
     const page = context.pages().find((candidate) => candidate.url().startsWith('https://photos.google.com'))
       || context.pages()[0]
       || await context.newPage();
-    if (!page.url().startsWith('https://photos.google.com')) {
+    if (page.url() !== PHOTO_HOME) {
       await page.goto(PHOTO_HOME, { waitUntil: 'domcontentloaded' });
     }
     await waitForSignedIn(page, headed);
@@ -258,7 +259,11 @@ export async function run(options) {
     console.log(`完了: ${JSON.stringify(counts)}`);
     if (counts.failed > 0) process.exitCode = 1;
   } finally {
-    if (ownsBrowser) await context.close();
+    if (ownsBrowser) {
+      await context.close();
+    } else if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
 
