@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "motion": "node scripts/download-motion-photos.mjs",
+    "motion:all": "node scripts/download-and-extract.mjs",
     "motion:extract": "bash scripts/extract-motion-photo-videos.sh",
+    "photo:timestamp": "python3 scripts/set-file-timestamps.py",
+    "photo:curate": "python3 scripts/curate-best-media.py",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

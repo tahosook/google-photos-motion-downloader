@@ -36,7 +36,7 @@ MP4_TAGS = [
     'QuickTime:ModifyDate',
 ]
 
-TARGET_EXTENSIONS = ('.jpg', '.jpeg', '.mp4')
+TARGET_EXTENSIONS = ('.jpg', '.jpeg', '.mp4', '.heic')
 
 
 def require_command(cmd: str) -> None:
@@ -141,7 +141,7 @@ def process_one(path: Path) -> Tuple[str, Optional[datetime]]:
     filename = path.name
     ts_str: Optional[str] = None
 
-    if suffix in ('.jpg', '.jpeg'):
+    if suffix in ('.jpg', '.jpeg', '.heic'):
         meta = get_exif_metadata(str(path), JPG_TAGS)
         ts_str = pick_best_timestamp(meta, JPG_TAGS)
     elif suffix == '.mp4':

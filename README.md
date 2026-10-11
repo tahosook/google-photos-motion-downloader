@@ -1,15 +1,61 @@
 # Google Photos Motion Downloader
 
-指定した日付範囲のGoogleフォトから、モーション写真だけを動画としてダウンロードします。
+Googleフォトからダウンロードした写真（Motion Photo）から動画（MP4）を抽出・整理するツールです。
 
 ## Setup
 
 ```bash
 npm install
+# 必要に応じて（ブラウザ自動ダウンロードを使用する場合のみ）
 npx playwright install chromium
 ```
 
-## First Run
+## Extract MP4 from JPG (動画抽出)
+
+Googleフォト等からダウンロードした Motion Photo（JPG/JPEG）に埋め込まれた動画を、`exiftool` で MP4 として抽出します。
+MP4 は元の画像と同じフォルダに保存され、処理済みの元 JPG/JPEG は対象フォルダ直下の `jpg/` に移動されます。
+同名の MP4 や移動先の JPG/JPEG が既にある場合はスキップされます。
+
+```bash
+npm run motion:extract -- /path/to/photos
+```
+
+対象フォルダを省略した場合は、カレントディレクトリを検索します。
+
+```bash
+npm run motion:extract
+```
+
+## Set File Timestamps (撮影日時の復元)
+
+Googleフォトの一括ダウンロードやZIP解凍等により、ファイルのタイムスタンプが「ダウンロード日時」になってしまった場合に、EXIF / QuickTimeのメタデータから本来の撮影日時（JST）を取得して作成日・変更日（macOS対応）を一括復元します。
+JPG、MP4、HEIC に対応しています。
+
+```bash
+npm run photo:timestamp -- /path/to/photos
+```
+
+## Curate Best Media (最高品質アルバムの作成)
+
+複数のフォルダ（iPhone、Pixel、ドラレコ等）から最高品質の写真・動画だけを厳選し、重複のない `champion/` フォルダを自動生成します。
+
+- **Motion Photo**: 同一撮影の静止画（JPG）を除外し、動画（MP4）を優先採用
+- **iPhone写真**: 再エンコードされたJPEG（偽装HEIC）ではなく、オリジナルの生HEIC（HDR・広色域保持）を優先採用
+- **重複排除**: SHA-256ハッシュによる完全同一ファイルの自動集約
+- **タイムスタンプ維持**: 元の撮影日時を保持して配置
+
+```bash
+npm run photo:curate -- /path/to/source_dir
+```
+
+---
+
+## Google フォトからのブラウザダウンロード (参考機能)
+
+> [!NOTE]
+> Google フォトのUI仕様変更やセッション状態により、ブラウザ経由の自動ダウンロードが安定しない場合があります。基本的にはGoogleフォトのWebやアプリから通常通り写真をダウンロードし、上記の `npm run motion:extract` で動画を抽出する運用が確実です。
+
+### 初回認証 (First Run)
 
 初回は表示ブラウザを起動してGoogleにログインします。
 
@@ -17,15 +63,15 @@ npx playwright install chromium
 npm run motion -- --from 2026-03-07 --to 2026-03-08 --headed
 ```
 
-ログイン状態は `.auth/google-photos/` に保存されます。このディレクトリはGit管理対象外です。
+ログイン状態は `.auth/google-photos/` に保存されます。
 
-## Normal Run
+### 通常実行 (Normal Run)
 
 ```bash
 npm run motion -- --from 2026-03-07 --to 2026-03-08
 ```
 
-通常の Chrome のログイン済みセッションを使う場合は、Chrome を専用プロファイルとリモートデバッグポート付きで起動します。既存の通常プロファイルを直接指定する方法は、Chrome のプロファイルロックと DevTools 制限により利用しません。
+通常の Chrome のログイン済みセッションを使う場合:
 
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -33,58 +79,27 @@ npm run motion -- --from 2026-03-07 --to 2026-03-08
   --user-data-dir="$PWD/.auth/google-photos-cdp"
 ```
 
-表示された Chrome で Google フォトにログインした後、別のターミナルで実行します。
-
 ```bash
 npm run motion -- --from 2026-03-07 --to 2026-03-08 --cdp-url http://127.0.0.1:9222
 ```
 
-動画は既定で次の構成に保存されます。
+### ダウンロードと動画抽出の一括実行
 
-```text
-downloads/
-  2026-03-07/
-  2026-03-08/
-```
-
-保存先を変更する場合:
+ダウンロード後に続けて動画抽出・日時設定まで実行する場合:
 
 ```bash
-npm run motion -- --from 2026-03-07 --to 2026-03-08 --output /path/to/output
+npm run motion:all -- --from 2026-03-07 --to 2026-03-08
 ```
 
-## Extract MP4 from JPG
+### Tampermonkey (User Script)
 
-Googleフォトから取得した Motion Photo の JPG/JPEG に埋め込まれた動画を、
-`exiftool` で MP4 として抽出できます。MP4 は元の画像と同じフォルダに保存され、
-処理済みの元 JPG/JPEG は対象フォルダ直下の `jpg/` に移動されます。
-同名の MP4 や移動先の JPG/JPEG が既にある場合はスキップされます。
-
-```bash
-npm run motion:extract -- /path/to/photos
-```
-
-対象フォルダを省略した場合は、現在のフォルダを検索します。
-
-```bash
-npm run motion:extract
-```
-
-同じ写真は `.motion-manifest.json` に記録され、再実行時にスキップされます。強制的に再取得する場合は `--force` を指定します。
-
-```bash
-npm run motion -- --from 2026-03-07 --to 2026-03-08 --force
-```
-
-## Tampermonkey (User Script)
-
-普段使いの Chrome で Google フォトを開いて直接ダウンロードする場合は、Tampermonkey ユーザースクリプトも利用できます。
+普段使いの Chrome で Google フォトを開いて直接ダウンロードする場合のユーザースクリプトです。
 
 1. Tampermonkey に `scripts/tampermonkey-motion-downloader.user.js` を登録します。
 2. 通常の Chrome で Google フォト（https://photos.google.com/）を開くと、画面右上に操作パネルが表示されます。
 3. 日付範囲を指定して「開始」をクリックすると、順次ダウンロードされます。
 
-## Options
+### Options
 
 ```text
 --from YYYY-MM-DD  対象開始日。終了日を含む
@@ -94,6 +109,7 @@ npm run motion -- --from 2026-03-07 --to 2026-03-08 --force
 --cdp-url URL      起動済み Chrome に接続（例: http://127.0.0.1:9222）
 --headed           ブラウザを表示して実行
 --force            マニフェスト記録済みの写真も再取得
+--skip-timestamps  タイムスタンプ設定をスキップ（motion:all のみ）
 --help             ヘルプを表示
 ```
 
@@ -103,4 +119,4 @@ npm run motion -- --from 2026-03-07 --to 2026-03-08 --force
 npm test
 ```
 
-このスクリプトはGoogleフォト内の写真を削除、アーカイブ、編集しません。ログイン状態が期限切れになった場合は、`--headed` を付けて再ログインしてください。
+このスクリプトはGoogleフォト内の写真を削除、アーカイブ、編集しません。
